@@ -471,16 +471,78 @@ private theorem count_outputs {B : Type} {m : ℕ} {H : Fin m → F B} {T C : Se
     · have h := ih J goal inj (by intro i hi; rintro (e | old); exact hits ⟨i,hi,e⟩; exact missing i hi old)
       omega
 
+
+-- Count the raw changes needed for one distinguished target while reserving
+-- the gates of other targets that change on at most one of its tests.
+private theorem count_with_row {B : Type} {n m : ℕ} {H : Fin m → F B}
+    {T A : Set (F B)} {k : ℕ} (r : Run T A k) (b : B) (x : Fin n → B)
+    (u : F B) (goalU : u ∈ T) (X : Finset (Fin n))
+    (diff : ∀ p ∈ X, u (x p) ≠ u b)
+    (single : ∀ f ∈ A, (X.filter (fun p => f (x p) ≠ f b)).card ≤ 1)
+    (J : Finset (Fin m)) (goal : ∀ i ∈ J, H i ∈ T)
+    (inj : ∀ i ∈ J, ∀ j ∈ J, H i = H j → i=j) (missing : ∀ i ∈ J, H i ∉ A)
+    (tiny : ∀ i ∈ J, (X.filter (fun p => H i (x p) ≠ H i b)).card ≤ 1) :
+    X.card + J.card ≤ k+1 := by
+  classical
+  induction r generalizing X J with
+  | stop done =>
+    have empty : J = ∅ := Finset.eq_empty_iff_forall_notMem.mpr
+      (fun i hi => missing i hi (done (goal i hi)))
+    have one := single u (done goalU)
+    have eq : X.filter (fun p => u (x p) ≠ u b) = X := Finset.filter_true_of_mem diff
+    simpa [empty,eq] using one
+  | @step A k o f g hf hg tail ih =>
+    let v := gate o f g
+    by_cases hits : ∃ i ∈ J, H i = v
+    · obtain ⟨i,hi,eq⟩ := hits
+      have next := ih X diff (by
+        rintro t (rfl | old); simpa only [eq] using tiny i hi; exact single t old)
+        (J.erase i) (fun j hj => goal j (Finset.mem_erase.mp hj).2)
+        (fun j hj l hl => inj j (Finset.mem_erase.mp hj).2 l (Finset.mem_erase.mp hl).2)
+        (by intro j hj; rintro (e | old)
+            · exact (Finset.mem_erase.mp hj).1 (inj j (Finset.mem_erase.mp hj).2 i hi (e.trans eq.symm))
+            · exact missing j (Finset.mem_erase.mp hj).2 old)
+        (fun j hj => tiny j (Finset.mem_erase.mp hj).2)
+      have := Finset.card_erase_add_one hi; omega
+    · have miss (i) (hi : i ∈ J) : H i ∉ insert v A := by
+        rintro (eq | old); exact hits ⟨i,hi,eq⟩; exact missing i hi old
+      let d (t : F B) := X.filter (fun p => t (x p) ≠ t b)
+      have sub : d v ⊆ d f ∪ d g := by
+        intro p hp
+        obtain ⟨mem,ne⟩ := Finset.mem_filter.mp hp
+        by_contra bad
+        simp [d,mem] at bad
+        exact ne (by simp [v,gate,bad.1,bad.2])
+      have size := Finset.card_le_card sub
+      have union := Finset.card_union_le (d f) (d g)
+      have ff : (d f).card ≤ 1 := single f hf
+      have gg : (d g).card ≤ 1 := single g hg
+      by_cases small : (d v).card ≤ 1
+      · have h := ih X diff (by rintro t (rfl | old); exact small; exact single t old) J goal inj miss tiny
+        omega
+      · obtain ⟨p,hp⟩ := Finset.card_pos.mp (by omega : 0 < (d v).card)
+        have px := (Finset.mem_filter.mp hp).1
+        have reduce (t : F B) : (X.erase p).filter (fun q => t (x q) ≠ t b) = (d t).erase p := by
+          ext q; simp [d]; grind
+        have sub' (t : F B) : ((d t).erase p).card ≤ (d t).card := Finset.card_le_card (Finset.erase_subset _ _)
+        have newv := Finset.card_erase_add_one hp
+        have h := ih (X.erase p) (fun q hq => diff q (Finset.mem_erase.mp hq).2)
+          (by intro t ht; rw [reduce]; rcases ht with rfl | old
+              · change ((d v).erase p).card ≤ 1; omega
+              · exact (sub' t).trans (single t old))
+          J goal inj miss (by intro i hi; rw [reduce]; exact (sub' _).trans (tiny i hi))
+        have := Finset.card_erase_add_one px; omega
+
 /-- The deficit of the bound is at most the sum, over rows, of the number
 of distinguished inputs beyond the first two. -/
-theorem shared_deficit {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
+theorem focused_deficit {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
     (nonempty : ∀ i, (S i).Nonempty)
     (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
     (low : ∀ p ∉ K, (Finset.univ.filter (fun i => p ∈ S i)).card ≤ 2)
-    (gs : List Gate) (out : Fin m → ℕ)
+    (mark : Option (Fin m)) (gs : List Gate) (out : Fin m → ℕ)
     (ho : ∀ g ∈ gs, (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2)
     (he : ∀ i (x : Fin n → Bool), Circuit.eval ⟨gs,out i⟩ (List.ofFn x) =
-      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length + (∑ i, ((S i ∩ K).card-2)) := by
+      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length + (∑ i, ((S i ∩ K).card-2)) - (mark.elim 0 (fun i => (S i ∩ K).card-2)) := by
   classical
   let B := Option (Fin n ⊕ Fin m)
   let C : Set (B → Bool) := Set.range (fun b : Bool => fun _ => b) ∪ Set.range (fun t : Fin n ⊕ Fin m => fun b : B => decide (b = some t))
@@ -592,6 +654,44 @@ theorem shared_deficit {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (F
       change decide (some (.inl q) = some t) = true at e2
       exact pq (Sum.inl.inj (Option.some.inj ((of_decide_eq_true e1).trans (of_decide_eq_true e2).symm)))
   have reserve := count_outputs baseRun J (fun i _ => Set.mem_range_self i) distinct costly
+  have stronger : J.card + mark.elim 0 (fun i => (S i ∩ K).card-2) ≤ baseCost := by
+    cases mark with
+    | none => simpa using reserve
+    | some a =>
+      simp only [Option.elim_some]
+      by_cases ma : a ∈ J
+      · let X := S a ∩ K
+        have hzero (t : Fin m) : G t none = false := by simp [G,extra,H]
+        let point := fun p : Fin n => (some (Sum.inl p) : B)
+        have h := count_with_row baseRun none point (G a) (Set.mem_range_self a) X
+          (by intro p hp; rw [hzero]; change G a (some (.inl p)) ≠ false; rw [test,decide_eq_true hp]; decide)
+          (by
+            intro f hf
+            rcases hf with ⟨b,rfl⟩ | ⟨t,rfl⟩
+            · simp
+            · apply Finset.card_le_one.mpr
+              intro p hp q hq
+              have ep := (Finset.mem_filter.mp hp).2
+              have eq := (Finset.mem_filter.mp hq).2
+              simp [point] at ep eq
+              exact Sum.inl.inj (Option.some.inj (ep.trans eq.symm)))
+          (J.erase a) (fun i _ => Set.mem_range_self i)
+          (fun i hi j hj => distinct i (Finset.mem_erase.mp hi).2 j (Finset.mem_erase.mp hj).2)
+          (fun i hi => costly i (Finset.mem_erase.mp hi).2)
+          (by
+            intro i hi
+            apply le_trans _ (lin i a (Finset.mem_erase.mp hi).1)
+            apply Finset.card_le_card
+            intro p hp
+            obtain ⟨mem,diff⟩ := Finset.mem_filter.mp hp
+            simp [point,hzero,test] at diff
+            exact Finset.mem_inter.mpr ⟨diff.1,(Finset.mem_inter.mp mem).1⟩)
+        have card := Finset.card_erase_add_one ma
+        change (S a ∩ K).card + _ ≤ _ at h
+        have large : 2 ≤ (S a ∩ K).card := by simpa [J] using ma
+        omega
+      · have small : ¬ 2 ≤ (S a ∩ K).card := by simpa [J] using ma
+        omega
   have cost i : (L i).card + (if i ∈ J then 1 else 0) + ((S i ∩ K).card-2) =
       ((S i).card-1) + (if i ∈ I then 1 else 0) := by
     change (S i \ K).card + _ + _ = _
@@ -606,6 +706,34 @@ theorem shared_deficit {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (F
       by_cases two : 2 ≤ (S i ∩ K).card <;> simp [J,h,two] <;> omega
   have tot := Finset.sum_congr (s₁ := Finset.univ) rfl (fun i _ => cost i)
   simp [Finset.sum_add_distrib] at tot
+  omega
+
+theorem shared_deficit {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
+    (nonempty : ∀ i, (S i).Nonempty)
+    (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
+    (low : ∀ p ∉ K, (Finset.univ.filter (fun i => p ∈ S i)).card ≤ 2)
+    (gs : List Gate) (out : Fin m → ℕ)
+    (ho : ∀ g ∈ gs, (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2)
+    (he : ∀ i (x : Fin n → Bool), Circuit.eval ⟨gs,out i⟩ (List.ofFn x) =
+      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length + (∑ i, ((S i ∩ K).card-2)) := by
+  simpa using focused_deficit S K nonempty lin low none gs out ho he
+
+theorem one_exceptional_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
+    (nonempty : ∀ i, (S i).Nonempty)
+    (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
+    (low : ∀ p ∉ K, (Finset.univ.filter (fun i => p ∈ S i)).card ≤ 2)
+    (a : Fin m) (rest : ∀ i, i ≠ a → (S i ∩ K).card ≤ 2)
+    (gs : List Gate) (out : Fin m → ℕ)
+    (ho : ∀ g ∈ gs, (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2)
+    (he : ∀ i (x : Fin n → Bool), Circuit.eval ⟨gs,out i⟩ (List.ofFn x) =
+      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length := by
+  classical
+  have h := focused_deficit S K nonempty lin low (some a) gs out ho he
+  have sum : (∑ i, ((S i ∩ K).card-2)) = (S a ∩ K).card-2 := by
+    apply Finset.sum_eq_single a
+    · intro j _ ne; exact Nat.sub_eq_zero_of_le (rest j ne)
+    · simp
+  simp [sum] at h
   omega
 
 theorem at_most_two_shared_per_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
