@@ -737,4 +737,41 @@ theorem split_output_unused : 10 ∉ D triple (splitExample.map (freeze false)) 
       p = 2 := by decide
   exact huv ((ht u hu).trans (ht v hv).symm)
 
+-- A one-NOT circuit for a three-point OR with three disconnected singleton tests.
+def maskedTriple : List Gate :=
+  [⟨.not, [3]⟩, ⟨.or, [3,4]⟩, ⟨.and, [3,4]⟩, ⟨.and, [0,5]⟩,
+   ⟨.and, [1,5]⟩, ⟨.and, [2,5]⟩, ⟨.or, [6,7]⟩, ⟨.or, [10,8]⟩, ⟨.or, [11,9]⟩]
+
+theorem masked_correct : ∀ x : Fin 4 → Bool,
+    Circuit.eval ⟨maskedTriple, 12⟩ (List.ofFn x) = (x 0 || x 1 || x 2) := by decide
+
+theorem masked_join (b : Bool) (p q : Fin 4) :
+    joinable triple (maskedTriple.map (freeze b)) p q → p = q := by
+  rintro ⟨i, hz, hp, hq⟩
+  by_cases hr : i < 13
+  · have test : ∀ (b : Bool) (i : Fin 13) (p q : Fin 4),
+        val (maskedTriple.map (freeze b)) (Zof triple) i = false →
+        val (maskedTriple.map (freeze b)) (eof p) i = true →
+        val (maskedTriple.map (freeze b)) (eof q) i = true → p = q := by decide
+    exact test b ⟨i, hr⟩ p q hz hp hq
+  · have high : 4 + (maskedTriple.map (freeze b)).length ≤ i := by
+      simpa [maskedTriple] using (show 13 ≤ i by omega)
+    rw [outside_gates _ _ _ (Or.inr high), val_nil, dite_eq_right (show ¬ i < 4 by omega)] at hp
+    contradiction
+
+theorem masked_requires_three (b : Bool) (T : Finset (Fin 4))
+    (h : ∀ p ∈ triple, ∃ q ∈ T,
+      Relation.ReflTransGen (joinable triple (maskedTriple.map (freeze b))) p q) :
+    3 ≤ T.card := by
+  have eqp {p q} (path : Relation.ReflTransGen
+      (joinable triple (maskedTriple.map (freeze b))) p q) : p = q := by
+    induction path with
+    | refl => rfl
+    | tail _ link ih => exact ih.trans (masked_join _ _ _ link)
+  have sub : triple ⊆ T := by
+    intro p hp
+    obtain ⟨q, hq, path⟩ := h p hp
+    exact eqp path ▸ hq
+  exact (show 3 = triple.card by decide) ▸ Finset.card_le_card sub
+
 end PEqualNP.Outside.L_meta_951_aux
