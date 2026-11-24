@@ -4,9 +4,9 @@ import PEqualNP.Outside.L_meta_951_private
 # Gate lower bounds with heavily shared inputs
 
 The ordinary data inputs can each occur in two rows. The remaining inputs
-may occur arbitrarily often, provided each row contains at most one of them.
+may occur arbitrarily often, with an exact bound when each row contains at most two of them.
 Restrict those remaining inputs to assignments of Hamming weight at most one.
-Treat arbitrary functions of this restricted assignment as free input wires.
+Track the available functions of this restricted assignment as gates are added.
 
 A paid binary gate masking a data input shared by two rows cannot be the sole
 way that input reaches the outputs. Fix the masking operand at its absorbing
@@ -16,8 +16,11 @@ along this distinction. Induction charges the incidences of all data inputs.
 Padding handles rows without a distinguished input. The circuit simulation
 below preserves the project's semantics for invalid and missing wire reads.
 
-The main declarations are at_most_one_shared_per_row, six_rows_bound and
-five_outputs. None of them requires an upper bound on the number of NOT gates.
+The base functions are tracked by a separate circuit. guarded_split counts
+its gates in addition to the data incidences. Distinct rows with at least
+two distinguished inputs require distinct base outputs. This gives
+shared_deficit and the exact bounds at_most_two_shared_per_row and
+six_outputs, even for circuits with unrestricted numbers of NOT gates.
 -/ 
 namespace Oracle951
 open PEqualNP.CircuitLowerBounds
@@ -172,13 +175,26 @@ private theorem masked {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H 
   have dif : row (S i) (H i) (b,x) ≠ row (S i) (H i) (b,y) := by simp [row,hb,ex,ey]
   exact ⟨b,x,y,i,by intro q hq; simp [x,hq],dif,by intro eq; exact dif (eq ▸ mask),Or.inl mask⟩
 
-theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H : Fin m → B → Bool)
+def pool (n : ℕ) {B : Type} (C : Set (B → Bool)) : Set (F (D n B)) :=
+  Set.range raw ∪ (base '' C)
+
+private theorem cut_pool {n : ℕ} {B : Type} {C : Set (B → Bool)}
+    (cc : ∀ b : Bool, (fun _ => b) ∈ C) (p : Fin n) {f : F (D n B)} (hf : f ∈ pool n C) :
+    cut p f ∈ pool n C := by
+  rcases hf with ⟨q,rfl⟩ | ⟨b,mb,rfl⟩
+  · by_cases eq : q=p
+    · subst q; exact Or.inr ⟨_,cc false,by funext d; simp [cut,pin,base,raw]⟩
+    · exact Or.inl ⟨q,by funext d; simp [cut,pin,raw,eq]⟩
+  · exact Or.inr ⟨b,mb,rfl⟩
+
+theorem guarded_split {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H : Fin m → B → Bool)
     (zero : ∃ b, ∀ i, H i b = false) (pos : ∀ i, ∃ b, H i b = true)
     (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
     (deg : ∀ p, (through S p).card ≤ 2)
     (separate : ∀ p i j, i ≠ j → p ∈ S i → p ∈ S j → ∀ b, H i b = false ∨ H j b = false)
-    (k : ℕ) (run : Run (Set.range (fun i => row (S i) (H i))) (start n B) k) :
-    ∑ i, (S i).card ≤ k := by
+    (C : Set (B → Bool)) (cc : ∀ b : Bool, (fun _ => b) ∈ C)
+    (k : ℕ) (run : Run (Set.range (fun i => row (S i) (H i))) (pool n C) k) :
+    ∃ j, Run (Set.range H) C j ∧ (∑ i, (S i).card) + j ≤ k := by
   classical
   obtain ⟨z,hz⟩ := zero
   have noraw i (q : Fin n) : row (S i) (H i) ≠ raw q := by
@@ -190,33 +206,51 @@ theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H :
     have empty i : S i = ∅ := by
       by_contra! ne
       obtain ⟨p,hp⟩ := ne
-      rcases done (Set.mem_range_self i) with ⟨q,e⟩ | ⟨b,e⟩
+      rcases done (Set.mem_range_self i) with ⟨q,e⟩ | ⟨b,hb,e⟩
       · exact noraw i q e.symm
       · have h1 := congrFun e (z,fun _ => true)
         have h2 := congrFun e (z,fun _ => false)
         simp [base,row,hz] at h1 h2; grind
-    simp [empty]
+    refine ⟨0,.stop ?_,by simp [empty]⟩
+    rintro _ ⟨i,rfl⟩
+    rcases done (Set.mem_range_self i) with ⟨q,e⟩ | ⟨b,mb,e⟩
+    · exact (noraw i q e.symm).elim
+    · have eq : b = H i := by funext u; simpa [base,row] using congrFun e (u,fun _=>false)
+      exact eq ▸ mb
   | @step _ k o f g hf hg tail =>
     let v := gate o f g
-    have freeGate (ha : v ∈ start n B) : ∑ i, (S i).card ≤ k+1 := by
+    have freeGate (ha : v ∈ pool n C) : ∃ j, Run (Set.range H) C j ∧ (∑ i, (S i).card) + j ≤ k+1 := by
       have r := weaken tail (Set.insert_subset_iff.mpr ⟨ha,Set.Subset.rfl⟩)
-      exact (guarded_bound S H ⟨z,hz⟩ pos lin deg separate k r).trans (by omega)
-    have finish (p : Fin n) (ev : cut p v ∈ start n B)
-        (wit : 2 ≤ (through S p).card → Witness S H p v) : ∑ i, (S i).card ≤ k+1 := by
+      obtain ⟨j,rj,len⟩ := guarded_split S H ⟨z,hz⟩ pos lin deg separate C cc k r
+      exact ⟨j,rj,by omega⟩
+    have baseGate (op : Op) (a b : B → Bool) (ma : a ∈ C) (mb : b ∈ C)
+        (eq : v = base (gate op a b)) :
+        ∃ j, Run (Set.range H) C j ∧ (∑ i, (S i).card) + j ≤ k+1 := by
+      let C' := insert (gate op a b) C
+      have sub : insert v (pool n C) ⊆ pool n C' := by
+        rintro _ (rfl | ⟨q,rfl⟩ | ⟨h,mh,rfl⟩)
+        · exact Or.inr ⟨_,Set.mem_insert _ _,eq.symm⟩
+        · exact Or.inl ⟨q,rfl⟩
+        · exact Or.inr ⟨h,Set.mem_insert_of_mem _ mh,rfl⟩
+      obtain ⟨j,rj,len⟩ := guarded_split S H ⟨z,hz⟩ pos lin deg separate C'
+        (fun t => Set.mem_insert_of_mem _ (cc t)) k (weaken tail sub)
+      exact ⟨j+1,.step op ma mb rj,by omega⟩
+    have finish (p : Fin n) (ev : cut p v ∈ pool n C)
+        (wit : 2 ≤ (through S p).card → Witness S H p v) : ∃ j, Run (Set.range H) C j ∧ (∑ i, (S i).card) + j ≤ k+1 := by
       let T := Set.range (fun i => row (S i) (H i))
       let extra := decide (2 ≤ (through S p).card)
       have test : ∃ d e : D n B,
-          (extra = true → ∃ a ∈ T, a d ≠ a e ∧ a ∉ insert v (start n B)) ∧
-          (extra = true → ∀ a ∈ insert v (start n B), a d ≠ a e → ∃ s : Bool, cut p a = fun _ => s) := by
+          (extra = true → ∃ a ∈ T, a d ≠ a e ∧ a ∉ insert v (pool n C)) ∧
+          (extra = true → ∀ a ∈ insert v (pool n C), a d ≠ a e → ∃ s : Bool, cut p a = fun _ => s) := by
         by_cases two : 2 ≤ (through S p).card
         · obtain ⟨b,x,y,i,agree,dif,neq,stable⟩ := wit two
           refine ⟨(b,x),(b,y),fun _ => ⟨_,Set.mem_range_self i,dif,?_⟩,?_⟩
-          · rintro (eq | ⟨q,eq⟩ | ⟨h,eq⟩)
+          · rintro (eq | ⟨q,eq⟩ | ⟨h,_,eq⟩)
             · exact neq eq
             · exact noraw i q eq.symm
             · exact dif (by rw [←eq]; rfl)
           · intro _ a ha change'
-            rcases ha with rfl | ⟨q,rfl⟩ | ⟨b,rfl⟩
+            rcases ha with rfl | ⟨q,rfl⟩ | ⟨b,mb,rfl⟩
             · exact stable.resolve_left change'
             · by_cases eq : q = p
               · subst q; exact ⟨false,by funext t; simp [cut,raw,pin]⟩
@@ -224,8 +258,8 @@ theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H :
             · exact (change' rfl).elim
         · exact ⟨(z,fun _=>false),(z,fun _=>false),by simp [extra,two],by simp [extra,two]⟩
       obtain ⟨d,e,diff,dead⟩ := test
-      obtain ⟨j,r,len⟩ := project tail p (A' := start n B)
-        (by rintro _ (rfl | old); exact ev; exact cut_start p old) const_mem extra d e diff dead
+      obtain ⟨j,r,len⟩ := project tail p (A' := pool n C)
+        (by rintro _ (rfl | old); exact ev; exact cut_pool cc p old) (fun b => Or.inr ⟨_,cc b,rfl⟩) extra d e diff dead
       let S' := fun i => (S i).erase p
       have eqT : cut p '' T = Set.range (fun i => row (S' i) (H i)) := by
         ext a; simp [T,Set.mem_range,S',cut_row]
@@ -233,25 +267,26 @@ theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H :
       rw [eqT] at r
       have lt : j < k+1 := by omega
       have sub i : S' i ⊆ S i := Finset.erase_subset _ _
-      have low := guarded_bound S' H ⟨z,hz⟩ pos
+      obtain ⟨u,ru,low⟩ := guarded_split S' H ⟨z,hz⟩ pos
         (fun i j ne => (Finset.card_le_card (Finset.inter_subset_inter (sub _) (sub _))).trans (lin i j ne))
         (fun q => (Finset.card_le_card (show through S' q ⊆ through S q by
           intro i hi; simpa [through] using sub i (by simpa [through] using hi : q ∈ S' i))).trans (deg q))
-        (fun q i j ne hi hj => separate q i j ne (sub i hi) (sub j hj)) j r
+        (fun q i j ne hi hj => separate q i j ne (sub i hi) (sub j hj)) C cc j r
+      refine ⟨u,ru,?_⟩
       rw [erase_sum S p]
-      change (∑ i, (S' i).card) + _ ≤ _
+      change (∑ i, (S' i).card) + _ + u ≤ _
       have := deg p
       by_cases two : 2 ≤ (through S p).card <;> simp [extra,two] at len <;> omega
-    have binary (p : Fin n) (h : F (D n B)) (src : h ∈ start n B) (t : Bool)
+    have binary (p : Fin n) (h : F (D n B)) (src : h ∈ pool n C) (t : Bool)
         (ev : ∀ d, v d = if t then (d.2 p || h d) else (d.2 p && h d)) :
-        (∑ i, (S i).card) ≤ k+1 := by
-      rcases src with ⟨q,rfl⟩ | ⟨b,rfl⟩
+        ∃ j, Run (Set.range H) C j ∧ (∑ i, (S i).card) + j ≤ k+1 := by
+      rcases src with ⟨q,rfl⟩ | ⟨b,mb,rfl⟩
       · by_cases same : p = q
         · subst q
           apply freeGate; exact Or.inl ⟨p,by funext d; rw [ev]; cases t <;> simp [raw]⟩
         · apply finish p
           · cases t
-            · exact Or.inr ⟨fun _ => false,by funext d; simp [cut,ev,pin,base]⟩
+            · exact Or.inr ⟨fun _ => false,cc false,by funext d; simp [cut,ev,pin,base]⟩
             · exact Or.inl ⟨q,by funext d; simp [cut,ev,pin,raw,Ne.symm same]⟩
           · intro two
             obtain ⟨i,j,ne,hi,hj⟩ := hit_pair S p two
@@ -270,8 +305,8 @@ theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H :
         · obtain ⟨s,hs⟩ := able
           apply finish p
           · cases t
-            · exact Or.inr ⟨fun _ => false,by funext d; simp [cut,ev,pin,base]⟩
-            · exact Or.inr ⟨b,by funext d; simp [cut,ev,pin,base]⟩
+            · exact Or.inr ⟨fun _ => false,cc false,by funext d; simp [cut,ev,pin,base]⟩
+            · exact Or.inr ⟨b,mb,by funext d; simp [cut,ev,pin,base]⟩
           · intro two; obtain ⟨i,j,ne,hi,hj⟩ := hit_pair S p two
             obtain ⟨a,ap,an⟩ : ∃ a, p ∈ S a ∧ H a s = false := by
               rcases separate p i j ne hi hj s with h | h
@@ -284,9 +319,9 @@ theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H :
             funext d; rw [ev]; have hn := able d.1; cases t <;> cases hb : b d.1 <;> simp_all [base,raw]⟩
     cases o with
     | inv =>
-      rcases hf with ⟨p,rfl⟩ | ⟨b,rfl⟩
+      rcases hf with ⟨p,rfl⟩ | ⟨b,mb,rfl⟩
       · apply finish p
-        · exact Or.inr ⟨fun _ => true,by funext d; simp [cut,v,gate,Op.val,raw,pin,base]⟩
+        · exact Or.inr ⟨fun _ => true,cc true,by funext d; simp [cut,v,gate,Op.val,raw,pin,base]⟩
         · intro two
           obtain ⟨i,j,ne,hi,hj⟩ := hit_pair S p two
           refine ⟨z,fun q => decide (q=p),fun _ => false,i,by simp_all,?_,?_,?_⟩
@@ -294,20 +329,31 @@ theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H :
           · intro eq; have h := congrFun eq (z,fun _ => false)
             simp [row,hz,v,gate,Op.val,raw] at h
           · exact Or.inr ⟨true,by funext d; simp [cut,raw,v,gate,Op.val,pin]⟩
-      · exact freeGate (Or.inr ⟨fun x => !(b x),rfl⟩)
+      · exact baseGate .inv b b mb mb rfl
     | conj =>
-      rcases hf with ⟨p,rfl⟩ | ⟨a,rfl⟩
+      rcases hf with ⟨p,rfl⟩ | ⟨a,ma,rfl⟩
       · exact binary p g hg false (by simp [v,gate,Op.val,raw])
-      · rcases hg with ⟨p,rfl⟩ | ⟨b,rfl⟩
-        · exact binary p (base a) (.inr ⟨a,rfl⟩) false (by simp [v,gate,Op.val,raw,Bool.and_comm])
-        · exact freeGate (Or.inr ⟨fun x => a x && b x,rfl⟩)
+      · rcases hg with ⟨p,rfl⟩ | ⟨b,mb,rfl⟩
+        · exact binary p (base a) (.inr ⟨a,ma,rfl⟩) false (by simp [v,gate,Op.val,raw,Bool.and_comm])
+        · exact baseGate .conj a b ma mb rfl
     | disj =>
-      rcases hf with ⟨p,rfl⟩ | ⟨a,rfl⟩
+      rcases hf with ⟨p,rfl⟩ | ⟨a,ma,rfl⟩
       · exact binary p g hg true (by simp [v,gate,Op.val,raw])
-      · rcases hg with ⟨p,rfl⟩ | ⟨b,rfl⟩
-        · exact binary p (base a) (.inr ⟨a,rfl⟩) true (by simp [v,gate,Op.val,raw,Bool.or_comm])
-        · exact freeGate (Or.inr ⟨fun x => a x || b x,rfl⟩)
+      · rcases hg with ⟨p,rfl⟩ | ⟨b,mb,rfl⟩
+        · exact binary p (base a) (.inr ⟨a,ma,rfl⟩) true (by simp [v,gate,Op.val,raw,Bool.or_comm])
+        · exact baseGate .disj a b ma mb rfl
 termination_by k
+
+theorem guarded_bound {n m : ℕ} {B : Type} (S : Fin m → Finset (Fin n)) (H : Fin m → B → Bool)
+    (zero : ∃ b, ∀ i, H i b = false) (pos : ∀ i, ∃ b, H i b = true)
+    (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
+    (deg : ∀ p, (through S p).card ≤ 2)
+    (separate : ∀ p i j, i ≠ j → p ∈ S i → p ∈ S j → ∀ b, H i b = false ∨ H j b = false)
+    (k : ℕ) (run : Run (Set.range (fun i => row (S i) (H i))) (start n B) k) :
+    ∑ i, (S i).card ≤ k := by
+  have eq : pool n (Set.univ : Set (B → Bool)) = start n B := by simp [pool,start]
+  obtain ⟨j,_,le⟩ := guarded_split S H zero pos lin deg separate Set.univ (by simp) k (eq ▸ run)
+  omega
 
 private def appendGate {Ω : Type} (w : List (F Ω)) (g : Gate) : List (F Ω) :=
   w ++ [fun d => g.op.eval (g.inputs.map fun k => (w.getD k (fun _ => false)) d)]
@@ -404,29 +450,52 @@ private theorem pad {Ω : Type} {m : ℕ} (u v h : Fin m → F Ω) (I : Finset (
     · subst a; rw [change' i (sub (Finset.mem_insert_self _ _))]; exact Set.mem_insert _ _
     · exact Set.mem_insert_of_mem _ (mem a (by simp [e,ha]))
 
-/-- Each nonempty row has at most one member of K. A variable outside K may occur in
-up to two rows. The members of K have unrestricted incidence degrees. -/
-theorem at_most_one_shared_per_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
-    (nonempty : ∀ i, (S i).Nonempty) (one : ∀ i, (S i ∩ K).card ≤ 1)
+private theorem count_outputs {B : Type} {m : ℕ} {H : Fin m → F B} {T C : Set (F B)} {k : ℕ}
+    (r : Run T C k) (J : Finset (Fin m)) (goal : ∀ i ∈ J, H i ∈ T)
+    (inj : ∀ i ∈ J, ∀ j ∈ J, H i = H j → i=j) (missing : ∀ i ∈ J, H i ∉ C) :
+    J.card ≤ k := by
+  classical
+  induction r generalizing J with
+  | stop done =>
+    have : J = ∅ := Finset.eq_empty_iff_forall_notMem.mpr (fun i hi => missing i hi (done (goal i hi)))
+    simp [this]
+  | @step A k o f g hf hg tail ih =>
+    by_cases hits : ∃ i ∈ J, H i = gate o f g
+    · obtain ⟨i,hi,eq⟩ := hits
+      have h := ih (J.erase i) (fun q hq => goal q (Finset.mem_erase.mp hq).2)
+        (fun q hq t ht => inj q (Finset.mem_erase.mp hq).2 t (Finset.mem_erase.mp ht).2)
+        (by intro q hq; rintro (e | old)
+            · exact (Finset.mem_erase.mp hq).1 (inj q (Finset.mem_erase.mp hq).2 i hi (e.trans eq.symm))
+            · exact missing q (Finset.mem_erase.mp hq).2 old)
+      have := Finset.card_erase_add_one hi; omega
+    · have h := ih J goal inj (by intro i hi; rintro (e | old); exact hits ⟨i,hi,e⟩; exact missing i hi old)
+      omega
+
+/-- The deficit of the bound is at most the sum, over rows, of the number
+of distinguished inputs beyond the first two. -/
+theorem shared_deficit {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
+    (nonempty : ∀ i, (S i).Nonempty)
     (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
     (low : ∀ p ∉ K, (Finset.univ.filter (fun i => p ∈ S i)).card ≤ 2)
     (gs : List Gate) (out : Fin m → ℕ)
     (ho : ∀ g ∈ gs, (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2)
     (he : ∀ i (x : Fin n → Bool), Circuit.eval ⟨gs,out i⟩ (List.ofFn x) =
-      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length := by
+      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length + (∑ i, ((S i ∩ K).card-2)) := by
   classical
   let B := Option (Fin n ⊕ Fin m)
+  let C : Set (B → Bool) := Set.range (fun b : Bool => fun _ => b) ∪ Set.range (fun t : Fin n ⊕ Fin m => fun b : B => decide (b = some t))
+  have cc (b : Bool) : (fun _ => b) ∈ C := Or.inl ⟨b,rfl⟩
   let L := fun i => S i \ K
   let H (i : Fin m) (b : B) := decide (∃ q ∈ S i ∩ K, b = some (Sum.inl q))
   let enc (d : D n B) (q : Fin n) := if q ∈ K then decide (d.1 = some (Sum.inl q)) else d.2 q
   let w : List (F (D n B)) := List.ofFn (fun q : Fin n => fun d => enc d q)
   let T := Set.range (fun i => row (L i) (H i))
   have sub i : L i ⊆ S i := Finset.sdiff_subset
-  obtain ⟨j,run,size⟩ := available (T := T) (A := start n B) gs w ho
+  obtain ⟨j,run,size⟩ := available (T := T) (A := pool n C) gs w ho
     (by intro f hf; simp [w] at hf; obtain ⟨q,rfl⟩ := hf; by_cases qk : q ∈ K
-        · exact Or.inr ⟨fun b => decide (b=some (Sum.inl q)),by funext d; simp [enc,base,qk]⟩
+        · exact Or.inr ⟨fun b => decide (b=some (Sum.inl q)),Or.inr ⟨_,rfl⟩,by funext d; simp [enc,base,qk]⟩
         · exact Or.inl ⟨q,by funext d; simp [enc,raw,qk]⟩)
-    const_mem (by
+    (fun b => Or.inr ⟨_,cc b,rfl⟩) (by
       rintro t ⟨i,rfl⟩; refine ⟨out i,?_⟩; funext d
       have r := he i (enc d)
       have hw : w.map (fun f => f d) = List.ofFn (enc d) := by simp [w,List.map_ofFn,Function.comp_def]
@@ -440,15 +509,18 @@ theorem at_most_one_shared_per_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K
   let extra (i : Fin m) (b : B) := decide (i ∈ I ∧ b = some (.inr i))
   let G (i : Fin m) (b : B) := H i b || extra i b
   let U := Set.range (fun i => row (L i) (G i))
-  have augmented : Run U (start n B) (I.card+j) := by
+  have augmented : Run U (pool n C) (I.card+j) := by
     apply after_run run
     intro A subA orig
     apply pad (fun i => row (L i) (H i)) (fun i => row (L i) (G i)) (fun i => base (extra i)) I
     · intro i hi; funext d; simp [G,extra,hi,row]
     · intro i hi; funext d; simp [G,gate,Op.val,row,base]; grind
     · exact fun i => orig (Set.mem_range_self _)
-    · exact fun i => subA (Or.inr ⟨extra i,rfl⟩)
-  have bound := guarded_bound L G ⟨none,by simp [G,extra,H]⟩
+    · intro i; apply subA; apply Or.inr; refine ⟨extra i,?_,rfl⟩
+      by_cases hi : i ∈ I
+      · exact Or.inr ⟨.inr i,by funext b; simp [extra,hi]⟩
+      · exact Or.inl ⟨false,by funext b; simp [extra,hi]⟩
+  obtain ⟨baseCost,baseRun,bound⟩ := guarded_split L G ⟨none,by simp [G,extra,H]⟩
     (by intro i; by_cases mem : i ∈ I
         · exact ⟨some (.inr i),by simp [G,extra,mem]⟩
         · have hn : (S i ∩ K).Nonempty := Finset.nonempty_iff_ne_empty.mpr (by simpa [I] using mem)
@@ -483,21 +555,79 @@ theorem at_most_one_shared_per_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K
             have lt : 1 < (S i ∩ S l).card := Finset.one_lt_card.mpr
               ⟨p,Finset.mem_inter.mpr ⟨m1.1,m2.1⟩,q,Finset.mem_inter.mpr ⟨qi,ql⟩,by
                 intro e; exact m1.2 (e ▸ qk)⟩
-            have := lin i l ne; omega) (I.card+j) augmented
-  have cost i : (L i).card = ((S i).card-1) + (if i ∈ I then 1 else 0) := by
-    change (S i \ K).card = _
+            have := lin i l ne; omega) C cc (I.card+j) augmented
+  let J := Finset.univ.filter (fun i => 2 ≤ (S i ∩ K).card)
+  have test (i : Fin m) (p : Fin n) : G i (some (.inl p)) = decide (p ∈ S i ∩ K) := by
+    unfold G extra H
+    have hx : ¬(i ∈ I ∧ (some (.inl p) : B) = some (.inr i)) := by grind
+    rw [decide_eq_false hx,Bool.or_false]; congr 1; apply propext; constructor
+    · rintro ⟨q,hq,eq⟩; exact (Sum.inl.inj (Option.some.inj eq)) ▸ hq
+    · intro h; exact ⟨p,h,rfl⟩
+  have witness (i) (hi : i ∈ J) : ∃ p ∈ S i ∩ K, ∃ q ∈ S i ∩ K, p ≠ q :=
+    Finset.one_lt_card.mp (show 2 ≤ _ from by simpa [J] using hi)
+  have distinct (i) (hi : i ∈ J) (l) (_ : l ∈ J) (eq : G i = G l) : i=l := by
+    by_contra ne
+    obtain ⟨p,hp,q,hq,pq⟩ := witness i hi
+    have transfer (r) (hr : r ∈ S i ∩ K) : r ∈ S l := by
+      have e := congrFun eq (some (.inl r))
+      rw [test,test,decide_eq_true hr] at e
+      exact (Finset.mem_inter.mp (of_decide_eq_true e.symm)).1
+    have lt : 1 < (S i ∩ S l).card := Finset.one_lt_card.mpr
+      ⟨p,Finset.mem_inter.mpr ⟨(Finset.mem_inter.mp hp).1,transfer p hp⟩,
+       q,Finset.mem_inter.mpr ⟨(Finset.mem_inter.mp hq).1,transfer q hq⟩,pq⟩
+    have := lin i l ne; omega
+  have costly (i) (hi : i ∈ J) : G i ∉ C := by
+    obtain ⟨p,hp,q,hq,pq⟩ := witness i hi
+    rintro (⟨b,eq⟩ | ⟨t,eq⟩)
+    · have e0 := congrFun eq none
+      have e1 := congrFun eq (some (.inl p))
+      simp [G,H,extra] at e0
+      rw [test,decide_eq_true hp] at e1
+      simp_all
+    · have e1 := congrFun eq (some (.inl p))
+      have e2 := congrFun eq (some (.inl q))
+      rw [test,decide_eq_true hp] at e1
+      rw [test,decide_eq_true hq] at e2
+      change decide (some (.inl p) = some t) = true at e1
+      change decide (some (.inl q) = some t) = true at e2
+      exact pq (Sum.inl.inj (Option.some.inj ((of_decide_eq_true e1).trans (of_decide_eq_true e2).symm)))
+  have reserve := count_outputs baseRun J (fun i _ => Set.mem_range_self i) distinct costly
+  have cost i : (L i).card + (if i ∈ J then 1 else 0) + ((S i ∩ K).card-2) =
+      ((S i).card-1) + (if i ∈ I then 1 else 0) := by
+    change (S i \ K).card + _ + _ = _
     rw [Finset.card_sdiff,Finset.inter_comm K (S i)]
     have hp := Finset.card_pos.mpr (nonempty i)
-    have le := one i
+    have hsub : (S i ∩ K).card ≤ (S i).card := Finset.card_le_card Finset.inter_subset_left
     by_cases h : i ∈ I
     · have e : S i ∩ K = ∅ := by simpa [I] using h
-      simp [e,h]; omega
+      simp [J,e,h]; omega
     · have e : (S i ∩ K).Nonempty := Finset.nonempty_iff_ne_empty.mpr (by simpa [I] using h)
       have := Finset.card_pos.mpr e
-      simp [h]; omega
-  simp only [cost,Finset.sum_add_distrib] at bound
-  simp at bound
+      by_cases two : 2 ≤ (S i ∩ K).card <;> simp [J,h,two] <;> omega
+  have tot := Finset.sum_congr (s₁ := Finset.univ) rfl (fun i _ => cost i)
+  simp [Finset.sum_add_distrib] at tot
   omega
+
+theorem at_most_two_shared_per_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
+    (nonempty : ∀ i, (S i).Nonempty) (one : ∀ i, (S i ∩ K).card ≤ 2)
+    (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
+    (low : ∀ p ∉ K, (Finset.univ.filter (fun i => p ∈ S i)).card ≤ 2)
+    (gs : List Gate) (out : Fin m → ℕ)
+    (ho : ∀ g ∈ gs, (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2)
+    (he : ∀ i (x : Fin n → Bool), Circuit.eval ⟨gs,out i⟩ (List.ofFn x) =
+      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length := by
+  have d := shared_deficit S K nonempty lin low gs out ho he
+  simpa [fun i => Nat.sub_eq_zero_of_le (one i)] using d
+
+theorem at_most_one_shared_per_row {n m : ℕ} (S : Fin m → Finset (Fin n)) (K : Finset (Fin n))
+    (nonempty : ∀ i, (S i).Nonempty) (one : ∀ i, (S i ∩ K).card ≤ 1)
+    (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
+    (low : ∀ p ∉ K, (Finset.univ.filter (fun i => p ∈ S i)).card ≤ 2)
+    (gs : List Gate) (out : Fin m → ℕ)
+    (ho : ∀ g ∈ gs, (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2)
+    (he : ∀ i (x : Fin n → Bool), Circuit.eval ⟨gs,out i⟩ (List.ofFn x) =
+      decide (∃ v ∈ S i, x v = true)) : ∑ i, ((S i).card-1) ≤ gs.length := by
+  exact at_most_two_shared_per_row S K nonempty (fun i => (one i).trans (by decide)) lin low gs out ho he
 
 -- Three row outputs and three column outputs, with a separate input shared
 -- by the three rows and one shared by the three columns.
@@ -621,5 +751,55 @@ theorem five_outputs {n m : ℕ} (S : Fin m → Finset (Fin n)) (hm : m ≤ 5)
       (fun p np => by have d : ¬3 ≤ (through S p).card := by simpa [K] using np
                       change (through S p).card ≤ 2; omega) gs out ho he
 termination_by gs.length
+
+
+/-- Every heavy point in a row uses at least two other rows. Distinct points
+use disjoint sets of other rows by the intersection condition. -/
+private theorem heavy_count {m n : ℕ} (S : Fin m → Finset (Fin n)) (a : Fin m)
+    (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1) :
+    2 * (S a ∩ Finset.univ.filter (fun p => 3 ≤ (through S p).card)).card ≤ m-1 := by
+  classical
+  let X := S a ∩ Finset.univ.filter (fun p => 3 ≤ (through S p).card)
+  let R := fun p => (through S p).erase a
+  have big p (hp : p ∈ X) : 2 ≤ (R p).card := by
+    obtain ⟨ha,hd⟩ : p ∈ S a ∧ 3 ≤ (through S p).card := by simpa [X] using hp
+    have mem : a ∈ through S p := by simp [through,ha]
+    have := Finset.card_erase_add_one mem
+    change 2 ≤ ((through S p).erase a).card
+    omega
+  have disj : ∀ p ∈ X, ∀ q ∈ X, p ≠ q → Disjoint (R p) (R q) := by
+    intro p hp q hq pq
+    apply Finset.disjoint_left.mpr
+    intro i hi hj
+    have ne := (Finset.mem_erase.mp hi).1
+    have h1 : p ∈ S i := by simpa [through] using (Finset.mem_erase.mp hi).2
+    have h2 : q ∈ S i := by simpa [through] using (Finset.mem_erase.mp hj).2
+    have lt : 1 < (S i ∩ S a).card := Finset.one_lt_card.mpr
+      ⟨p,Finset.mem_inter.mpr ⟨h1,(Finset.mem_inter.mp hp).1⟩,
+       q,Finset.mem_inter.mpr ⟨h2,(Finset.mem_inter.mp hq).1⟩,pq⟩
+    have := lin i a ne; omega
+  have sub : X.biUnion R ⊆ Finset.univ.erase a := by
+    intro i hi
+    obtain ⟨p,hp,mem⟩ := Finset.mem_biUnion.mp hi
+    exact Finset.mem_erase.mpr ⟨(Finset.mem_erase.mp mem).1,Finset.mem_univ _⟩
+  have lower := Finset.sum_le_sum big
+  have upper := Finset.card_le_card sub
+  rw [Finset.card_biUnion disj] at upper
+  have card := Finset.card_erase_add_one (Finset.mem_univ a)
+  simp only [Finset.card_univ,Fintype.card_fin] at card
+  change 2 * X.card ≤ _
+  simp at lower; omega
+
+theorem six_outputs {n m : ℕ} (S : Fin m → Finset (Fin n)) (hm : m ≤ 6)
+    (hs : ∀ i, (S i).Nonempty) (lin : ∀ i j, i ≠ j → (S i ∩ S j).card ≤ 1)
+    (gs : List Gate) (out : Fin m → ℕ) (he : Pin951.Computes S gs out)
+    (ho : ∀ g ∈ gs, Pin951.ok g.op ∧ g.inputs.length ≤ 2) :
+    ∑ i, ((S i).card-1) ≤ gs.length := by
+  classical
+  let K := Finset.univ.filter (fun p => 3 ≤ (through S p).card)
+  apply at_most_two_shared_per_row S K hs _ lin _ gs out ho he
+  · intro i; have h := heavy_count S i lin; change 2*(S i ∩ K).card ≤ m-1 at h; omega
+  · intro p hp; have h : ¬3 ≤ (through S p).card := by simpa [K] using hp
+    change (through S p).card ≤ 2; omega
 
 end Oracle951
